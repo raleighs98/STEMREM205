@@ -1,0 +1,350 @@
+---
+title: "Bootcamp 4"
+output: html_notebook
+---
+
+### In this Bootcamp, we're going to focus on the basics of single cell RNA analysis, including dimensionality reduction and opitional doublet detection and cell type identification/cell surface protein integration.
+
+#### Pipeline adapted from Katie Yost
+
+
+First, we'll have an introduction to the main R package used for single cell analysis - **Seurat**, developed by Rajul Satija's lab at the New York Genome Center. There are a few publications on how Seurat works that you can check out if you want more detail about what's going on under the hood:
+* https://www.ncbi.nlm.nih.gov/pubmed/29608179
+* https://www.ncbi.nlm.nih.gov/pubmed/31178118
+
+Seurat starts from the output of the 10X Genomics cellranger pipeline, which is used for processing of single cell RNA data generated using droplet-based capture. You can read more about how single cell RNA sequencing and the cellranger pipeline work here (and we may do a cellranger tutorial later if there is interest:  
+* https://www.10xgenomics.com/products/single-cell/?src=search&lss=google&cnm=sem-goog-2020-website-page-ra_g-p_brand-amr-retarget&cid=7011P000000oWys (videos at the end)
+* https://support.10xgenomics.com/single-cell-gene-expression/software/overview/welcome  
+
+The main idea is that single cells are captured in oil-water emulsion droplets along with barcoded oligos, which tag RNA transcripts with a unique cellular barcode during reverse transcription. After sequencing, the cellranger pipeline aligns the transcripts and matches them back to the cellular barcode to obtain counts for each transcript that was expressed for each cell. The main output that we will use from the cellranger pipeline is the **feature/cell matrix**, which is a matrix of cells by genes, where the values are the number of transcripts that were detected for that cell.  
+
+Single cell methods are not perfect, and one of the main things we have to deal with is **dropout**, which occurs when a transcript is expressed by a cell but is not recovered by single cell sequencing. Lowly expressed genes are more likely to be affected by dropout. For 10X datasets, typically we can expect to detect 1000-2000 genes per cell. The main approach that has been developed to deal with dropout during single cell analysis is dimensionality reduction. The main steps we will take in Seurat are:
+1. **Filter** cells based on QC metrics (number of genes detected, percent mitochondrial genes, etc.)
+2. **Normalize** data
+3. Identify **variable** genes to use for principal component analysis (PCA)
+4. **Scale** data and regress out unwanted sources of variation (i.e. cell cycle)
+5. **PCA** dimensionality reduction
+6. **Cluster** cells to find nearest neighbors in PCA space (typically corresponding to different cell types/states)
+7. Visualize cells using **UMAP/TSNE** non-linear dimensionality reduction
+8. Find **differentially expressed** genes between clusters
+9. **Cluster annotation**  
+
+There is obviously a lot we can do after this but these steps are common to any single cell project. To get started we will be using this publically available human PBMC dataset from 10X:
+* https://support.10xgenomics.com/single-cell-vdj/datasets/3.0.0/vdj_v1_hs_pbmc2_5gex_protein  
+
+Go ahead and download the **Feature / cell matrix (filtered)**. Unpack the tar.gz file either using Finder or with this command in terminal:  
+`tar -xzf vdj_v1_hs_pbmc2_5gex_protein_filtered_feature_bc_matrix.tar.gz`  
+
+You can also take a look at the **Summary HTML** which has the QC metrics from the cellranger pipeline. We will now be following the Seurat Guided Clustering Tutorial found here (but using the larger PBMC dataset we just downloaded):
+* https://satijalab.org/seurat/v3.1/pbmc3k_tutorial.html
+
+```{r}
+setwd("~/Documents/Stanford Classes/Biods 205/Bootcamp 4/scripts")
+
+```
+
+```{r}
+# Load required packges:
+library(dplyr)
+library(Seurat)
+```
+
+```{r}
+# Now we will follow the Seurat tutorial linked above:
+
+# Load the PBMC dataset - replace with the path to the filtered_feature_bc_matrix folder you unpacked
+pbmc.data <- Read10X(data.dir = "../data/filtered_feature_bc_matrix")
+```
+
+```{r}
+# Note that this dataset includes both gene and antibody information.
+# To initialize the Seurat object with just the RNA data, we modify this line as follows.
+
+# Initialize the Seurat object with the raw (non-normalized data).
+pbmc <- CreateSeuratObject(counts = pbmc.data$`Gene Expression`, project = "pbmc", min.cells = 3
+                           , min.features = 200)
+pbmc
+```
+
+```{r}
+saveRDS(pbmc, file = "../data/9K_pbmc_raw.rds")
+```
+
+There are a couple of important pivot points that you can modify for your data which we will break up by processing step:
+1. **Filter**  
+   a. `nFeature_RNA`: How many genes are detected per cell. I typically use 200 as a minimum but check the distribution in your data. Cells with fewer than 200 genes detected typically don't have enough information to cluster on.  
+   b. `nCount_RNA`: How many UMIs or transcripts detected per cell. I typically don't filter using this metric as it is linearly correlated with nFeature_RNA. Some people will use an upper threshold here to try and filter out doublets but typically is not robust and we describe alternative approaches below.  
+   c. `percent.mt`: Percent mitochondrial transcripts. Dying cells will have more mitochondrial gene content and so this can be used to filter low quality cells. Check the distribution in your data but typically upper thresholds of 5-10% mitochondrial content make sense.
+2. **Normalize** - I use the defaults pretty much always.
+3. **Variable genes** - Not a lot to modify here. If you have residual batch/unwanted variation (like cell cycle) effects after regression you can remove these genes from the variable gene set. Sometimes I also observed clustering based on variable immune genes (like TCR/Ig transcripts) so these can be removed as well.
+4. **Scale**  
+   a. `vars.to.regress`: If you have batch effects/sources of unwanted variation like cell cycle effects you can regress them out here. Some other common variables to regress are nCount_RNA, percent.mt (if you observe clustering based on these features & not due to remaining low quality cells).
+5. **PCA**  
+   a. `dims`: Pick how many dimensions to use for PCA. I typically use ElbowPlot to decide. Including more PCs is usually better than too few, so I would err past the elbow. Between 10-40 PCs is typically appropriate.
+6. **Cluster**  
+   a. `resolution`: Argument to the FindClusters function. This is a big one you can change. Higher resolution values will give more clusters, lower resolution values give fewer clusters. How many clusters you want depends on the biological variation in your data as well as how you want to analyze it (are broad cell types enough or do you want specific cell states?). Values between 0.4-1.2 are typically appropriate. 
+7. **UMAP** - UMAP is superior to TSNE in many ways so I won't talk about TSNE.  
+   a. `min.dist`: This will change how spread out the UMAP is with lower values pulling cells apart more. This is useful for closely related cells that may not seperate well in the UMAP using the default parameters.
+
+### 1. Filter
+
+```{r}
+# We calculate mitochondrial QC metrics with the PercentageFeatureSet() function, which calculates the percentage of 
+# counts originating from a set of features
+# We use the set of all genes starting with MT- as a set of mitochondrial genes
+pbmc$percent.mt <- PercentageFeatureSet(pbmc, pattern = "^MT-")
+```
+
+```{r}
+# The number of unique genes and total molecules are automatically calculated during CreateSeuratObject()
+# Show QC metrics for the first 5 cells
+head(pbmc@meta.data, 5)
+```
+
+
+```{r}
+# Visualize QC metrics as a violin plot
+VlnPlot(pbmc, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+```
+
+
+```{r}
+# Remove cells that have too many mitochondrial genes expressed or too many gene counts
+length(Cells(pbmc))
+pbmc <- subset(pbmc, subset = nFeature_RNA > 200 & percent.mt < 10)
+length(Cells(pbmc))
+```
+
+### 2. Normalize
+
+By default, we employ a global-scaling normalization method “LogNormalize” that turns counts into log(CPM+1). Counts per million normalizes for sequencing depth (for scRNA the default is counts per 10,000), and natural log normalization is used to adjust the data distribution to be semi-normal.
+
+```{r}
+# normalize
+pbmc <- NormalizeData(pbmc)
+```
+
+### 3. Variable Genes
+
+We next calculate a subset of features that exhibit high cell-to-cell variation in the dataset (i.e, they are highly expressed in some cells, and lowly expressed in others).
+
+```{r}
+# identify variable genes
+pbmc <- FindVariableFeatures(pbmc)
+```
+
+
+```{r}
+# view top 10
+top10 <- head(VariableFeatures(pbmc), 10)
+top10
+```
+
+```{r}
+# plot variablility distribution
+plot1 <- VariableFeaturePlot(pbmc)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot2
+```
+
+### 4. Scale the Data
+
+Shift the expression of each gene, so that the mean expression across cells is 0 and the standard deviation is 1. This is a standard pre-processing step prior to dimensional reduction techniques like PCA.
+
+```{r}
+# Z-score scale.
+all.genes <- rownames(pbmc)
+pbmc <- ScaleData(pbmc, features = all.genes)
+```
+
+### 5. PCA
+
+By default, only the previously determined variable features are used as input, but can be defined using features argument if you wish to choose a different subset.
+
+```{r}
+# PCA, default subsets to highly variable features
+pbmc <- RunPCA(pbmc)
+```
+
+
+```{r}
+# A visualization that is useful for determining how many PCs to include
+ElbowPlot(pbmc)
+```
+
+### 6. Cluster
+
+To overcome the extensive technical noise in any single feature for scRNA-seq data, Seurat clusters cells based on their PCA scores, with each PC essentially representing a ‘metafeature’ that combines information across a correlated feature set. The top principal components therefore represent a robust compression of the dataset.
+
+We first construct a KNN graph based on the euclidean distance in PCA space, and refine the edge weights between any two cells based on the shared overlap in their local neighborhoods (Jaccard similarity). This step is performed using the FindNeighbors() function, and takes as input the previously defined dimensionality of the dataset (first 15 PCs based on elbow plot).
+
+To cluster the cells, we next apply modularity optimization techniques such as the Louvain algorithm (default), to iteratively group cells together, with the goal of optimizing the standard modularity function. The FindClusters() function implements this procedure, and contains a resolution parameter that sets the ‘granularity’ of the downstream clustering, with increased values leading to a greater number of clusters. 
+
+
+```{r}
+# computing the neighborhood graph and find clusters
+pbmc <- FindNeighbors(pbmc, dims = 1:15)
+pbmc <- FindClusters(pbmc, resolution = 0.2)
+```
+
+### 7. UMAP (dimensionality reduction)
+
+The goal of non-linear dimensionality reduction is to learn the underlying manifold of the data in order to place similar cells together in low-dimensional space. Cells within the graph-based clusters determined above should co-localize on these dimension reduction plots.
+
+```{r}
+# run UMAP
+pbmc <- RunUMAP(pbmc, dims = 1:15)
+```
+
+```{r}
+# plot UMAP
+
+DimPlot(pbmc, reduction = "umap")
+```
+
+### Plot some common marker genes
+Here are couple of good markers for PBMCs:  
+   a. T cells: CD3G, CD3E, CD3D  
+   b. Helper CD4+ T cells: CD4  
+   c. Cytotoxic CD8+ T cells: CD8A  
+   d. Naive T cells: CCR7  
+   e. Memory CD8+ cells: EOMES  
+   f. Effector memory CD8+ T cells: KLRD1  
+   g. NK cells: GNLY, NKG7 (CD3-, NK cells and cytotoxic T cells share many markers and may cluster together)     
+   h. B cells: CD19, MS4A1  
+   i. Plasma B cells: JCHAIN   
+   j. Monocytes: CD14, FCGR3A  
+   k. Dendritic cells: FCER1A
+   l. Platelets: PPBP
+```{r}
+# plot common marker genes for pbmc
+genes_to_plot = c('CD3G','CD4',
+                 'CD8A','EOMES','KLRD1','NKG7')
+genes_to_plot2 = c('CD79A','JCHAIN',
+                 'CD14','FCGR3A','FCER1A',
+                 'PPBP')
+
+FeaturePlot(pbmc, reduction = "umap", features = genes_to_plot)
+FeaturePlot(pbmc, reduction = "umap", features = genes_to_plot2)
+```
+
+```{r}
+# since we know markers, let's make panels for some cell types that we expect to see
+t_cell_panel <-c('CD3E','CD8A','CD4','CCR7','EOMES','KLRD1')
+b_cell_panel <-c('CD79A','CD19','MS4A1','JCHAIN')
+monocyte_panel <-c('CD14','LYZ','FCGR3A','MS4A7')
+nk_panel <-c('GNLY','NKG7')
+dc_panel <-c('FCER1A','CST3')
+platelet_panel <-c('PPBP')
+```
+
+```{r}
+# t cells + NK cells
+
+# 1 = CD4 T
+# 3 = CD8 T effector memory
+# 4 = NK
+
+VlnPlot(pbmc, features = t_cell_panel)
+VlnPlot(pbmc, features = nk_panel)
+```
+
+```{r}
+# platelets
+
+# 8 = platelets
+VlnPlot(pbmc, features = platelet_panel)
+```
+
+
+```{r}
+# b cells
+
+# 2 = B
+# 9 = Doublet ?
+# 10 = Plasma B 
+ 
+VlnPlot(pbmc, features = b_cell_panel)
+```
+
+
+```{r}
+# monocytes
+
+# 0 = CD14 Mono
+# 6 = FCGR3A Mono
+
+VlnPlot(pbmc, features = monocyte_panel)
+```
+
+```{r}
+# DCs
+
+# 5 = DC
+
+VlnPlot(pbmc, features = dc_panel)
+```
+
+```{r}
+# 1 = CD4 T
+# 3 = CD8 T effector memory
+# 4 = NK
+# 8 = platelets
+# 2 = B
+# 9 = Plasma B ?
+# 10 = Plasma B ?
+# 0 = CD14 Mono
+# 6 = FCGR3A Mono
+# 5 = DC
+
+new.cluster.ids <- c("CD14+ Monocytes", 'CD4+ T cell', "B cells", 
+                     'CD8+ T effector memory cell', 'NK cells', 'Dendritic cells',
+                     'FCGR3A monocytes', "CD8+ T cell", 'Platelets', 
+                     'Doublet','Plasma B cells'
+                     )
+names(new.cluster.ids) <- levels(pbmc)
+pbmc <- RenameIdents(pbmc, new.cluster.ids)
+```
+
+```{r}
+# plot umap with renamed clusters
+DimPlot(pbmc, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
+```
+
+```{r}
+# Save plot
+png('../figures/umap_clusters_labeled.png')
+DimPlot(pbmc, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
+dev.off()
+```
+
+```{r}
+#isolate CD4 cells
+
+cd4 <- subset(pbmc, idents = 'CD4+ T cell')
+cd4 <- FindVariableFeatures(cd4)
+
+cd4 <- RunPCA(cd4)
+# computing the neighborhood graph and find clusters
+cd4 <- FindNeighbors(cd4, dims = 1:15)
+cd4 <- FindClusters(cd4, resolution = 0.3)
+
+cd4 <- RunUMAP(cd4, dims = 1:15)
+DimPlot(cd4, reduction = "umap", label=TRUE)
+
+naive_panel <-c('CCR7')
+regulatory_panel <-c('FOXP3')
+other_panel <- 'CD3D'
+
+VlnPlot(cd4, features = naive_panel)
+
+genes_to_plot = c('CCR7','FOXP3','CD3D')
+
+FeaturePlot(cd4, reduction = "umap", features = genes_to_plot, label=TRUE)
+
+new.cluster.ids <- c("Effector Memory", 'Naive/Central Memory', "Regulatory", 'Other')
+names(new.cluster.ids) <- levels(cd4)
+cd4 <- RenameIdents(cd4, new.cluster.ids)
+
+
+```
