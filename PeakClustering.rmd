@@ -1,0 +1,260 @@
+```{r}
+#This file was created based off of PeakAnalysis2 but for the express purposes of loading in all naive data (d0, d10, d20)
+#and performing PCA
+library(ChIPseeker)
+library(GenomicRanges)
+library(clusterProfiler)
+library(tidyverse)
+library(ggplot2)
+library(ggrepel)
+library(readxl)
+library(ggpubr)
+library(ggpmisc)
+library(reshape2)
+library(KEGGREST)
+library(org.Hs.eg.db)
+
+require(TxDb.Hsapiens.UCSC.hg19.knownGene)
+txdb <- TxDb.Hsapiens.UCSC.hg19.knownGene
+
+```
+
+
+```{r}
+
+## Multiple Condition Analysis
+
+setwd("~/Documents/Stanford Classes/Biods 205/Final Project/")
+
+
+#Indicate the modality of the data
+#data_type <- 'ATAC'
+#data_type <- 'H3K4me1'
+#data_type <- 'H3K4me3'
+data_type <- 'H3K27me3'
+#data_type <- 'H3K27ac'
+#data_type <- 'H3K9me3'
+
+
+#Indicate the features that you want to consider
+feature='Promoter'
+feature='Nondist'
+
+
+file_names <- switch(data_type,
+'ATAC' = c(
+  "cR_H9_EOS_d0_R1.mLb.clN_peaks.txt",
+  "cR_H9_EOS_d0_R2.mLb.clN_peaks.txt",
+  "cR_H9_EOS_d10_R1.mLb.clN_peaks.txt",
+  "cR_H9_EOS_d10_R2.mLb.clN_peaks.txt",
+  "cR_H9_EOS_d20X_R1.mLb.clN_peaks.txt",
+  "cR_H9_EOS_d20X_R2.mLb.clN_peaks.txt",
+  "H9_EOS_R1.mLb.clN_peaks.txt",
+  "H9_EOS_R2.mLb.clN_peaks.txt"
+),
+
+'H3K4me1' = c(
+  "cR_H9_EOS_d0_R1_peaks_H3K4me1.txt",
+  "cR_H9_EOS_d0_R2_peaks_H3K4me1.txt",
+  "cR_H9_EOS_d10_R1_peaks_H3K4me1.txt",
+  "cR_H9_EOS_d10_R2_peaks_H3K4me1.txt",
+  "cR_H9_EOS_d20X_R1_peaks_H3K4me1.txt",
+  "cR_H9_EOS_d20X_R2_peaks_H3K4me1.txt",
+  "H9_EOS_R1_peaks_H3K4me1.txt",
+  "H9_EOS_R2_peaks_H3K4me1.txt"
+),
+
+'H3K4me3' = c(
+  "cR_H9_EOS_d0_R1_peaks_H3K4me3.txt",
+  "cR_H9_EOS_d0_R2_peaks_H3K4me3.txt",
+  "cR_H9_EOS_d10_R1_peaks_H3K4me3.txt",
+  "cR_H9_EOS_d10_R2_peaks_H3K4me3.txt",
+  "cR_H9_EOS_d20X_R1_peaks_H3K4me3.txt",
+  "cR_H9_EOS_d20X_R2_peaks_H3K4me3.txt",
+  "H9_EOS_R1_peaks_H3K4me3.txt",
+  "H9_EOS_R2_peaks_H3K4me3.txt"
+),
+
+'H3K27me3' = c(
+  "cR_H9_EOS_d0_R1_peaks_H3K27me3.txt",
+  "cR_H9_EOS_d0_R2_peaks_H3K27me3.txt",
+  "cR_H9_EOS_d10_R1_peaks_H3K27me3.txt",
+  "cR_H9_EOS_d10_R2_peaks_H3K27me3.txt",
+  "cR_H9_EOS_d20X_R1_peaks_H3K27me3.txt",
+  "cR_H9_EOS_d20X_R2_peaks_H3K27me3.txt",
+  "H9_EOS_R1_peaks_H3K27me3.txt",
+  "H9_EOS_R2_peaks_H3K27me3.txt"
+),
+
+'H3K27ac' = c(
+  "cR_H9_EOS_d0_R1_peaks_H3K27ac.txt",
+  "cR_H9_EOS_d0_R2_peaks_H3K27ac.txt",
+  "cR_H9_EOS_d10_R1_peaks_H3K27ac.txt",
+  "cR_H9_EOS_d10_R2_peaks_H3K27ac.txt",
+  "cR_H9_EOS_d20X_R1_peaks_H3K27ac.txt",
+  "cR_H9_EOS_d20X_R2_peaks_H3K27ac.txt",
+  "H9_EOS_R1_peaks_H3K27ac.txt",
+  "H9_EOS_R2_peaks_H3K27ac.txt"
+),
+
+'H3K9me3' = c(
+  "cR_H9_EOS_d0_R1_peaks_H3K9me3.txt",
+  "cR_H9_EOS_d0_R2_peaks_H3K9me3.txt",
+  "cR_H9_EOS_d10_R1_peaks_H3K9me3.txt",
+  "cR_H9_EOS_d10_R2_peaks_H3K9me3.txt",
+  "cR_H9_EOS_d20X_R1_peaks_H3K9me3.txt",
+  "cR_H9_EOS_d20X_R2_peaks_H3K9me3.txt",
+  "H9_EOS_R1_peaks_H3K9me3.txt",
+  "H9_EOS_R2_peaks_H3K9me3.txt"
+))
+
+
+path_names <- paste0('GSE218510_peaks/', file_names)
+
+read_and_create_gr <- function(file_name) {
+    peaks <- read.table(file_name, header = TRUE, sep = "\t", comment.char = "#")
+    gr <- GRanges(
+        seqnames = peaks$chr,
+        ranges = IRanges(start = peaks$start, end = peaks$end),
+        strand = "*"
+        
+    )
+
+    #change chromosome names to match convention of txdb data ('1' becomes 'chr1')
+    existing_seqlevels <- unique(seqnames(gr))
+    updated_seqlevels <- paste0("chr", existing_seqlevels)
+    seqlevels(gr) <- updated_seqlevels
+
+    #include metadata
+    metadata_df <- peaks[, c("pileup", "X.log10.pvalue.", "fold_enrichment", "X.log10.qvalue.", "name")]
+    metadata <- DataFrame(metadata_df)
+    #score is fold enrichment
+    colnames(metadata)[colnames(metadata) == "fold_enrichment"] <- "Score"
+
+    mcols(gr) <- metadata
+
+
+
+    #look at chroms 1-22 + X
+    chromosomesToAnalyze <- paste0("chr", 1:22)
+    chromosomesToAnalyze <- c(chromosomesToAnalyze, "chrX")
+
+
+    gr_subset <- subset(gr, seqnames(gr) %in% chromosomesToAnalyze)
+    seqlevels(gr_subset) <- chromosomesToAnalyze
+
+  return(gr_subset)
+}
+
+#combine objects into a list
+gr_list <- lapply(path_names, read_and_create_gr)
+
+names(gr_list) <- c('cr_0_1','cr_0_2', 'cr_10_1', 'cr_10_2', 'cr_20_1','cr_20_2','p_1','p_2')
+```
+
+```{r}
+
+
+#annotate peaks
+peakAnnoList <- lapply(gr_list, annotatePeak, TxDb=txdb, 
+                       tssRegion=c(-1000, 1000), verbose=FALSE)
+
+#normalize to all reads
+total=0
+for(annot in peakAnnoList){
+    #print(sum(annot@anno$Score))
+    total<-total+sum(annot@anno$Score)
+
+}
+average=total/length(peakAnnoList)
+
+
+
+#create a list object that contains all peak data
+merged<- list()
+
+for(count in seq(1,length(peakAnnoList))){
+    suppressWarnings(peakAnnoList[[count]]@anno$Score <- peakAnnoList[[count]]@anno$Score*average/sum(peakAnnoList[[count]]@anno$Score))
+    toAnalyze=as.data.frame(peakAnnoList[[count]]@anno)
+    if (feature=='Promoter'){
+        toAnalyze <- subset(toAnalyze, annotation=='Promoter')
+    } else if (feature=='Nondist'){
+        toAnalyze <- subset(toAnalyze, annotation!='Distal Intergenic')
+    }
+    toAnalyze <- toAnalyze[, c("geneId", "Score")]
+    aggregated <- aggregate(Score ~ geneId, data = toAnalyze, FUN = sum)
+    
+    #print(head(count),2)
+
+    merged <- c(merged,list(aggregated))
+}
+
+merged <- Reduce(function(x,y) merge(x,y, by = 'geneId', all=TRUE),merged)
+colnames(merged)<- c('geneId', 'cr_0_1','cr_0_2', 'cr_10_1', 'cr_10_2', 'cr_20_1','cr_20_2','p_1','p_2')
+
+merged[is.na(merged)] <- 1
+
+```
+
+
+```{r}
+print((sum(merged$p_1)+sum(merged$p_2))/(sum(merged$cr_0_1)+sum(merged$cr_0_2)))
+
+```
+
+```{r}
+#Subset genes for cytoskeletal clustering
+library(KEGGREST)
+pathway_id <- "hsa04810"
+pathway_info <- keggGet(pathway_id)
+entrez_ids <- pathway_info[[1]]$GENE
+
+num_rows <- length(entrez_ids)/2
+col1 <- entrez_ids[seq(1, length(entrez_ids), by = 2)]
+col2 <- entrez_ids[seq(2, length(entrez_ids), by = 2)]
+gene_LUT <- data.frame(geneId = as.numeric(col1), Description = sapply(strsplit(col2, ";"), function(x) x[[1]]))
+
+
+
+
+
+merged <- merged[merged$geneId %in% gene_LUT$geneId, ]
+
+
+
+```
+
+
+```{r}
+#Run PCA
+scaled_data=t(merged[,-1])
+
+PCA_Result<- prcomp(scaled_data, scale.=TRUE)
+pc_scores <- as.data.frame(PCA_Result$x[, 1:2])
+
+colors <- c("red","red", "blue","blue", "green","green","yellow","yellow")
+
+ggplot(pc_scores, aes(x = PC1, y = PC2,color=colors)) +
+  geom_point(size=7) +
+  labs(x = "PC1 (49% of variance)", y = "PC2 (22% of variance)", title = "H3K27me3 Cytoskeletal PCA")+
+  theme_minimal() +  # Use a minimal theme without grid lines
+  theme(aspect.ratio = 1,
+    axis.title = element_text(size = 24),  # Adjust axis title size
+    plot.title = element_text(size = 28),
+    legend.key.size = unit(10, "lines"))
+
+
+
+eigenvalues <- PCA_Result$sdev^2
+
+# Calculate the total variance
+total_variance <- sum(eigenvalues)
+
+# Calculate the percentage of variance explained by each principal component
+variance_explained <- eigenvalues / total_variance * 100
+
+
+print(variance_explained)
+
+
+```

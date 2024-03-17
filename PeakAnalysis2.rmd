@@ -1,0 +1,448 @@
+```{r}
+#This file was used to assess changes in naive (chemically reset day 0) and primed (non-chemically reset) cultures
+#For PCA where multiple days of resetting were considered, the "PeakClustering.rmd" script was used
+
+library(ChIPseeker)
+library(GenomicRanges)
+library(clusterProfiler)
+library(tidyverse)
+library(ggplot2)
+library(ggrepel)
+library(readxl)
+library(ggpubr)
+library(ggpmisc)
+library(reshape2)
+library(KEGGREST)
+library(org.Hs.eg.db)
+
+require(TxDb.Hsapiens.UCSC.hg19.knownGene)
+txdb <- TxDb.Hsapiens.UCSC.hg19.knownGene
+```
+
+```{r}
+
+## Analysis for multiple modalities for naive (d0) and primed conditions
+
+setwd("~/Documents/Stanford Classes/Biods 205/Final Project/")
+
+#Indicate the modality of the data
+data_type <- 'ATAC'
+#data_type <- 'H3K4me1'
+#data_type <- 'H3K4me3'
+#data_type <- 'H3K27me3'
+#data_type <- 'H3K27ac'
+#data_type <- 'H3K9me3'
+
+#Indicate the features that you want to consider
+feature='Promoter'
+feature='Nondist'
+
+file_names <- switch(data_type,
+'ATAC' = c(
+  "cR_H9_EOS_d0_R1.mLb.clN_peaks.txt",
+  "cR_H9_EOS_d0_R2.mLb.clN_peaks.txt",
+  "H9_EOS_R1.mLb.clN_peaks.txt",
+  "H9_EOS_R2.mLb.clN_peaks.txt"
+),
+
+'H3K4me1' = c(
+  "cR_H9_EOS_d0_R1_peaks_H3K4me1.txt",
+  "cR_H9_EOS_d0_R2_peaks_H3K4me1.txt",
+  "H9_EOS_R1_peaks_H3K4me1.txt",
+  "H9_EOS_R2_peaks_H3K4me1.txt"
+),
+
+'H3K4me3' = c(
+  "cR_H9_EOS_d0_R1_peaks_H3K4me3.txt",
+  "cR_H9_EOS_d0_R2_peaks_H3K4me3.txt",
+  "H9_EOS_R1_peaks_H3K4me3.txt",
+  "H9_EOS_R2_peaks_H3K4me3.txt"
+),
+
+'H3K27me3' = c(
+  "cR_H9_EOS_d0_R1_peaks_H3K27me3.txt",
+  "cR_H9_EOS_d0_R2_peaks_H3K27me3.txt",
+  "H9_EOS_R1_peaks_H3K27me3.txt",
+  "H9_EOS_R2_peaks_H3K27me3.txt"
+),
+
+'H3K27ac' = c(
+  "cR_H9_EOS_d0_R1_peaks_H3K27ac.txt",
+  "cR_H9_EOS_d0_R2_peaks_H3K27ac.txt",
+  "H9_EOS_R1_peaks_H3K27ac.txt",
+  "H9_EOS_R2_peaks_H3K27ac.txt"
+),
+
+'H3K9me3' = c(
+  "cR_H9_EOS_d0_R1_peaks_H3K9me3.txt",
+  "cR_H9_EOS_d0_R2_peaks_H3K9me3.txt",
+  "H9_EOS_R1_peaks_H3K9me3.txt",
+  "H9_EOS_R2_peaks_H3K9me3.txt"
+))
+
+#files are located in folder titled 'GSE218510_peaks'
+path_names <- paste0('GSE218510_peaks/', file_names)
+
+#function for reading a peak file and creating a table of the results
+read_and_create_gr <- function(file_name) {
+    peaks <- read.table(file_name, header = TRUE, sep = "\t", comment.char = "#")
+    gr <- GRanges(
+        seqnames = peaks$chr,
+        ranges = IRanges(start = peaks$start, end = peaks$end),
+        strand = "*"
+        
+    )
+
+    #change chromosome names to match convention of txdb data ('1' becomes 'chr1')
+    existing_seqlevels <- unique(seqnames(gr))
+    updated_seqlevels <- paste0("chr", existing_seqlevels)
+    seqlevels(gr) <- updated_seqlevels
+    
+    #include metadata
+    metadata_df <- peaks[, c("pileup", "X.log10.pvalue.", "fold_enrichment", "X.log10.qvalue.", "name")]
+    metadata <- DataFrame(metadata_df)
+    #score is fold enrichment
+    colnames(metadata)[colnames(metadata) == "fold_enrichment"] <- "Score"
+
+    mcols(gr) <- metadata
+
+
+
+    #look at chroms 1-22 + X, exclude everything outside of this
+    chromosomesToAnalyze <- paste0("chr", 1:22)
+    chromosomesToAnalyze <- c(chromosomesToAnalyze, "chrX")
+    gr_subset <- subset(gr, seqnames(gr) %in% chromosomesToAnalyze)
+    seqlevels(gr_subset) <- chromosomesToAnalyze
+
+  return(gr_subset)
+}
+
+#create a list of peak objects based off of a path list
+gr_list <- lapply(path_names, read_and_create_gr)
+
+#the input files will always be in the following order:
+names(gr_list) <- c('Naive1','Naive2', 'Primed1', 'Primed2')
+
+```
+
+
+```{r}
+
+
+#annotate peaks
+peakAnnoList <- lapply(gr_list, annotatePeak, TxDb=txdb, 
+                       tssRegion=c(-1000, 1000), verbose=FALSE)
+
+
+#plotAnnoBar(peakAnnoList)
+#head(peakAnnoList[[1]]@anno, 10)
+
+#extract annotations
+naive1_annot <- as.data.frame(peakAnnoList[["Naive1"]]@anno)
+naive2_annot <- as.data.frame(peakAnnoList[["Naive2"]]@anno)
+primed1_annot <- as.data.frame(peakAnnoList[["Primed1"]]@anno)
+primed2_annot <- as.data.frame(peakAnnoList[["Primed2"]]@anno)
+
+#Normalize peaks based off all reads, not just subset reads
+
+average=(sum(naive1_annot$Score)+sum(naive2_annot$Score)
++sum(primed1_annot$Score)+sum(primed2_annot$Score))/4
+
+naive1_annot$Score=naive1_annot$Score*average/sum(naive1_annot$Score)
+naive2_annot$Score=naive2_annot$Score*average/sum(naive2_annot$Score)
+primed1_annot$Score=primed1_annot$Score*average/sum(primed1_annot$Score)
+primed2_annot$Score=primed2_annot$Score*average/sum(primed2_annot$Score)
+
+```
+
+
+```{r}
+#Extract peaks from either just the promoter or entire gene body (non-distal intergenic regions)
+
+if (feature=='Promoter'){
+  subset_naive1_annot <- as.data.frame(subset(naive1_annot, annotation=='Promoter'))
+  subset_naive2_annot <- as.data.frame(subset(naive2_annot, annotation=='Promoter'))
+  subset_primed1_annot <- as.data.frame(subset(primed1_annot, annotation=='Promoter'))
+  subset_primed2_annot <- as.data.frame(subset(primed2_annot, annotation=='Promoter'))
+} else if (feature=='Nondist'){
+  subset_naive1_annot <- as.data.frame(subset(naive1_annot, annotation!='Distal Intergenic'))
+  subset_naive2_annot <- as.data.frame(subset(naive2_annot, annotation!='Distal Intergenic'))
+  subset_primed1_annot <- as.data.frame(subset(primed1_annot, annotation!='Distal Intergenic'))
+  subset_primed2_annot <- as.data.frame(subset(primed2_annot, annotation!='Distal Intergenic'))
+
+}
+
+
+
+
+subset_naive1_annot <- subset_naive1_annot[, c("geneId", "Score")]
+subset_naive2_annot <- subset_naive2_annot[, c("geneId", "Score")]
+subset_primed1_annot <- subset_primed1_annot[, c("geneId", "Score")]
+subset_primed2_annot <- subset_primed2_annot[, c("geneId", "Score")]
+
+#Combine scores into single gene entry
+summedN1 <- aggregate(Score ~ geneId, data = subset_naive1_annot, FUN = sum)
+summedN2 <- aggregate(Score ~ geneId, data = subset_naive2_annot, FUN = sum)
+summedP1 <- aggregate(Score ~ geneId, data = subset_primed1_annot, FUN = sum)
+summedP2 <- aggregate(Score ~ geneId, data = subset_primed2_annot, FUN = sum)
+
+
+
+
+merge_list <- list(summedN1,summedN2,summedP1,summedP2)
+
+
+merged <- Reduce(function(x,y) merge(x,y, by = 'geneId', all=TRUE),merge_list)
+colnames(merged)<- c('geneId','Naive1Enrich', 'Naive2Enrich', 'Primed1Enrich', 'Primed2Enrich')
+
+
+#assume non-identified peaks have fold enrichment of 1 (not log2)
+merged[is.na(merged)] <- 1
+
+
+summedPromoters <- merged
+
+
+#Subset based on Kegg annotation
+library(KEGGREST)
+pathway_id <- "hsa04810"
+pathway_info <- keggGet(pathway_id)
+entrez_ids <- pathway_info[[1]]$GENE
+
+```
+
+```{r}
+#create a reference for the entrez IDs to gene symbols
+num_rows <- length(entrez_ids)/2
+col1 <- entrez_ids[seq(1, length(entrez_ids), by = 2)]
+col2 <- entrez_ids[seq(2, length(entrez_ids), by = 2)]
+gene_LUT <- data.frame(geneId = as.numeric(col1), Description = sapply(strsplit(col2, ";"), function(x) x[[1]]))
+
+
+
+
+#subset just the genes that match the annotation
+cytoskeletalPromoters <- summedPromoters[summedPromoters$geneId %in% gene_LUT$geneId, ]
+
+
+#calculate fold change
+naive_avg <- rowMeans(cytoskeletalPromoters[, c("Naive1Enrich", "Naive2Enrich")])
+primed_avg <- rowMeans(cytoskeletalPromoters[, c("Primed1Enrich", "Primed1Enrich")])
+fold_change <- primed_avg / naive_avg
+
+# Specify fold change threshold for upregulation
+
+names(fold_change)<- as.character(cytoskeletalPromoters$geneId)
+
+
+fold_change_df = data.frame(geneId = names(fold_change), fold_change = fold_change)
+
+fold_change_df <- merge(fold_change_df, gene_LUT, by = 'geneId')
+
+#calculate p values for change
+p_values <- sapply(seq_len(nrow(cytoskeletalPromoters)), function(i) {
+  t_test_result <- t.test(as.numeric(cytoskeletalPromoters[i, c("Naive1Enrich", "Naive2Enrich")]),
+                          as.numeric(cytoskeletalPromoters[i, c("Primed1Enrich", "Primed2Enrich")]))
+  t_test_result$p.value
+})
+
+adjusted_p_values <- p.adjust(p_values, method = "fdr")
+```
+
+```{r}
+
+#Graph genes based of ATAC and H3K27me3 fold change
+
+#ATAC_fold_change_df<- fold_change_df
+#ATAC<-fold_change_df[fold_change_df$fold_change>0, ]
+H3K27me3<-fold_change_df[fold_change_df$fold_change>0,]
+
+overlap <- intersect(ATAC$Description, H3K27me3$Description)
+
+combined <- merge(ATAC_fold_change_df, fold_change_df, by = 'Description', all=FALSE)
+combined$label <- NA
+
+genes=c('ARPC2', 'ACTR3C', 'CDC42', 'ACTN1', 'WASF1', 'ITGA3', 'ITGA11', 'ITGAD')
+for (gene in genes){
+    combined$label[combined$Description == gene] <- combined$Description[combined$Description==gene]
+
+}
+ggplot(combined, aes(x = log10(fold_change.x), y = log10(fold_change.y)))+
+  geom_point(color = "blue", size = 3)+  # Add points
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red")+
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red")+
+  geom_text_repel(aes(label = label), size = 8, color = "red")+
+  labs(x = expression(log[10] ~ "(ATAC Fold Change)"), y = expression(log[10]~"(H3K27me3 Change)"))+  # Axis and title labels
+  theme(axis.text = element_text(size = 26),  # Adjust axis text size
+          axis.title = element_text(size = 26),  # Adjust axis title size
+          axis.ticks = element_line(size = 1.5),
+          aspect.ratio = 1,
+          plot.title = element_text(size = 28))
+#print(ATAC[ATAC$Description %in% overlap,])
+```
+
+```{r}
+#plot enrichment of individual genes
+ggplot(fold_change_df, aes(x = log10(fold_change), y = -log10(adjusted_p_values))) +
+  geom_point(color = "blue", size = 3) +  # Add points
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red")+
+  labs(x = expression(log[10] ~ "(Enrichment)"), y = expression(-log[10]~"(p-value)"), title = paste(data_type,'Cytoskeletal Enrichment')) +  # Axis and title labels
+  geom_text_repel(aes(label = Description), color = "red")+  # Add text annotations without overlap
+  theme(axis.text = element_text(size = 22),  # Adjust axis text size
+          axis.title = element_text(size = 24),  # Adjust axis title size
+          axis.ticks = element_line(size = 1.5),
+          aspect.ratio = 1,
+          plot.title = element_text(size = 28))
+
+```
+
+
+```{r}
+
+#Plot changes in genome-wide accessibility
+cols=c('Naive1Enrich','Naive2Enrich', 'Primed1Enrich','Primed2Enrich')
+accessibility_matrix <- as.matrix(subset(summedPromoters, select = cols))
+#colnames(accessibility_matrix)<- c('Naive Enrichment R1','Naive Enrichment R2', 'Primed Enrichment R1','Primed Enrichment R2')
+log_mat <- log2(accessibility_matrix)
+
+differences <- (log_mat[, 1] + log_mat[, 2]) + (log_mat[, 3] + log_mat[, 4])
+
+sorted_mat <- log_mat[order(differences), ]
+
+print(head(summed_mat))
+# Sort the matrix based on the sum of rows
+#sorted_mat <- log_mat[order(rowSums(log_mat)), ]
+
+summed_mat <- cbind(rowSums(sorted_mat[, 1:2]), rowSums(sorted_mat[, 3:4]))
+colnames(summed_mat)<- c('Naive Enrichment', 'Primed Enrichment')
+
+rownames(summed_mat) <- NULL
+
+
+ggplot(data = melt(summed_mat), aes(x = Var2, y = Var1, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient(low = "blue", high = "red") +
+  labs(x = "Samples", y = "Genomic Regions", title = "Accessibility Changes Heatmap")+
+  theme(axis.text = element_text(size = 30),  # Adjust axis text size
+          axis.title = element_text(size = 24),  # Adjust axis title size
+          axis.ticks = element_line(size = 1.5),
+          aspect.ratio = 1.5,
+          plot.title = element_text(size = 28))
+
+
+```
+
+
+
+```{r}
+#Compare ATAC seq data to RNA Seq
+
+#RNA_cr_cyto is a file that contains the fold change of cytoskeletal-related gene symbols identified in RNA seq analysis
+
+file <- 'RNA_cr_cyto.xlsx'
+
+RNA_data<- read_excel(file)
+
+matching_rows <- sum(fold_change_df$Description %in% RNA_data$Symbol)
+
+colnames(RNA_data)[colnames(RNA_data) == 'Symbol'] <- 'Description'
+
+RNACompare <- merge(RNA_data, fold_change_df, by = 'Description', all=TRUE)
+
+fit <- lm(fold_change ~ log2FoldChange, data = RNACompare)
+r_squared <- summary(fit)$r.squared
+
+
+
+ggplot(RNACompare, aes(x = log2(fold_change), y = log2FoldChange)) +
+  geom_point(color = "blue", size = 5) + 
+  labs(x = expression("ATAC" ~ log[2] ~ "Fold Change"), y = expression("RNA" ~ log[2] ~ "Fold Change"), title = "ATAC-RNA Seq Cytoskeletal Comparison")+
+  geom_smooth(color = "red", method = "lm", se = FALSE)+
+  annotate("text", x = 1, y = 6, label = paste("R^2 =", round(r_squared, 3)), size = 10)+
+  theme(axis.text = element_text(size = 24),  # Adjust axis text size
+        axis.title = element_text(size = 28),  # Adjust axis title size
+        axis.ticks = element_line(size = 1.5),
+        aspect.ratio = 1,
+        plot.title = element_text(size = 28))
+  
+```
+
+
+
+```{r}
+
+#Perform GSEA on ATAC seq data
+sortedPromoters <- summedPromoters[order(-fold_change), ]
+
+
+
+
+gene_set_db <- "org.Hs.eg.db"
+fold_change = sort(fold_change, decreasing = TRUE)
+gsea_result <- gseGO(geneList = fold_change,
+                      OrgDb = gene_set_db,
+                      keyType = "ENTREZID",
+                      ont = "BP",  # Gene Ontology category (BP for biological process, MF for molecular function, CC for cellular component)
+                      scoreType='std',
+                      pvalueCutoff = 1,
+                     
+                      ) 
+
+print(gsea_result)
+
+dotplot(gsea_result, showCategory = 10)
+
+```
+
+
+```{r}
+#ATAC-RNA genome wide comparison
+all_entrez_ids <- keys(org.Hs.eg.db)
+
+human_genes <- select(org.Hs.eg.db, keys = all_entrez_ids, columns = c("SYMBOL", "ENTREZID"))
+
+# Print the first few rows of the result
+head(human_genes)
+
+naive_avg_all <- rowMeans(summedPromoters[, c("Naive1Enrich", "Naive2Enrich")])
+primed_avg_all <- rowMeans(summedPromoters[, c("Primed1Enrich", "Primed1Enrich")])
+fold_change_all <- primed_avg_all / naive_avg_all
+
+# Specify fold change threshold for upregulation
+
+names(fold_change_all)<- as.character(summedPromoters$geneId)
+
+
+fold_change_all_df = data.frame(ENTREZID = names(fold_change_all), fold_change = fold_change_all)
+
+fold_change_all_df <- merge(fold_change_all_df, human_genes, by = 'ENTREZID')
+
+
+########
+#RNA_cr_all is a file that contains the fold change of all gene symbols identified in RNA seq analysis
+file <- 'RNA_cr_all.xlsx'
+
+RNA_data<- read_excel(file)
+
+matching_rows <- sum(fold_change_all_df$SYMBOL %in% RNA_data$Symbol)
+
+colnames(RNA_data)[colnames(RNA_data) == 'Symbol'] <- 'SYMBOL'
+
+RNACompare_all <- merge(RNA_data, fold_change_all_df, by = 'SYMBOL', all=TRUE)
+
+fit <- lm(fold_change ~ log2FoldChange, data = RNACompare_all)
+r_squared <- summary(fit)$r.squared
+
+#plot correlation
+ggplot(RNACompare_all, aes(x = log2(fold_change), y = log2FoldChange)) +
+  geom_point(color = "blue", size = 5) + 
+  labs(x = expression("ATAC" ~ log[2] ~ "Fold Change"), y = expression("RNA" ~ log[2] ~ "Fold Change"), title = "ATAC-RNA Seq Cytoskeletal Comparison")+
+  geom_smooth(color = "red", method = "lm", se = FALSE)+
+  annotate("text", x = -3, y = 10, label = paste("R^2 =", round(r_squared, 3)), size = 10)+
+  theme(axis.text = element_text(size = 24),  # Adjust axis text size
+        axis.title = element_text(size = 28),  # Adjust axis title size
+        axis.ticks = element_line(size = 1.5),
+        aspect.ratio = 1,
+        plot.title = element_text(size = 28))
+
+```
